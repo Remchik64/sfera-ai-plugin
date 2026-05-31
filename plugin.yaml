@@ -1,0 +1,14 @@
+name: sfera_ai
+title: Sfera AI Bridge
+description: >
+  Self-activation bridge between Agent Zero and Sfera AI mobile app.
+  Enables real-time push notifications, reminders, and agent response
+  delivery via SSE (Server-Sent Events). Intercepts scheduler task
+  results and forwards them to connected mobile clients.
+version: 0.1.0
+always_enabled: false
+per_agent_config: false
+per_project_config: false
+settings_sections:
+  - agent
+api: {}
