@@ -1,6 +1,8 @@
 # Sfera AI Bridge Plugin Configuration
 # SSE settings for self-activation
 sse_enabled: true
+sse_port: 5006
+sse_host: localhost
 keepalive_interval: 30
 pending_events_ttl: 86400  # 24 hours in seconds
 max_pending_events: 100

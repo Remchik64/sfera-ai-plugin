@@ -1,24 +1,27 @@
 """Sfera AI SSE Bridge Extension - Intercepts agent responses and sends to SSE server.
 
 When A0 generates a response (from scheduler task or voice dialog),
-this extension forwards it to the standalone SSE server on port 32753,
+this extension forwards it to the standalone SSE server,
 which pushes the event to connected mobile clients.
 
 Architecture:
 - Intercepts ALL agent responses via message_loop_end extension point
-- Sends agent_response events to SSE server (localhost:32753/push)
+- Sends agent_response events to SSE server ({sse_host}:{sse_port}/push)
 - Checks for reminder patterns and sends reminder events
 - SSE server delivers events to Android app via SSE streaming
+- Port and host are configurable via default_config.yaml (sse_host, sse_port)
 
 No dependency on A0 ApiHandler for SSE — uses standalone server.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import time
 import json
 import logging
+import yaml
 from typing import Any
 
 from helpers.extension import Extension
@@ -26,8 +29,9 @@ from helpers.print_style import PrintStyle
 
 logger = logging.getLogger(__name__)
 
-# SSE server URL (standalone, not A0)
-SSE_SERVER_URL = "http://localhost:32753"
+# Default SSE server settings (overridden by default_config.yaml)
+_DEFAULT_SSE_HOST = "localhost"
+_DEFAULT_SSE_PORT = 5006
 
 # Russian reminder patterns for detection
 _REMINDER_KEYWORDS = [
@@ -42,6 +46,39 @@ _TIME_PATTERNS = [
     r'через\s+пол\s*часа',
     r'(?:в|на)\s+\d{1,2}:\d{2}',
 ]
+
+
+def _load_sse_config() -> tuple[str, int]:
+    """Load SSE host and port from plugin config file.
+    
+    Tries multiple paths to find default_config.yaml:
+    1. Plugin directory (relative to extension file)
+    2. /a0/usr/plugins/sfera_ai/default_config.yaml
+    3. Fallback to defaults
+    """
+    config_paths = [
+        os.path.join(os.path.dirname(__file__), '..', '..', '..', 'default_config.yaml'),
+        '/a0/usr/plugins/sfera_ai/default_config.yaml',
+    ]
+    
+    for path in config_paths:
+        path = os.path.normpath(path)
+        if os.path.isfile(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f) or {}
+                host = str(config.get('sse_host', _DEFAULT_SSE_HOST))
+                port = int(config.get('sse_port', _DEFAULT_SSE_PORT))
+                return host, port
+            except Exception as e:
+                logger.debug(f"Sfera SSE Bridge: Config load error from {path}: {e}")
+    
+    return _DEFAULT_SSE_HOST, _DEFAULT_SSE_PORT
+
+
+# Load config at module level
+_SSE_HOST, _SSE_PORT = _load_sse_config()
+SSE_SERVER_URL = f"http://{_SSE_HOST}:{_SSE_PORT}"
 
 
 def _detect_reminder(text: str) -> bool:
@@ -124,9 +161,11 @@ class SSEBridge(Extension):
 
     This is the key component for self-activation:
     - When a scheduler task completes, the agent response is intercepted
-    - Response is forwarded to standalone SSE server (port 32753)
+    - Response is forwarded to standalone SSE server (configurable port)
     - SSE server pushes event to mobile app
     - App shows notification and/or plays TTS
+    
+    SSE host and port are read from default_config.yaml (sse_host, sse_port).
     """
 
     async def execute(self, loop_data=None, **kwargs):
@@ -147,7 +186,7 @@ class SSEBridge(Extension):
         # For scheduler tasks: always send agent_response event
         if is_scheduler:
             PrintStyle.standard(
-                f"Sfera SSE Bridge: Scheduler task response, forwarding to SSE server"
+                f"Sfera SSE Bridge: Scheduler task response, forwarding to SSE server ({SSE_SERVER_URL})"
             )
             _push_to_sse("agent_response", {
                 "text": response_text,

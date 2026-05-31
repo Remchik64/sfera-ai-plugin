@@ -314,7 +314,7 @@ START_TIME = time.time()
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Sfera AI SSE Server')
     parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
-    parser.add_argument('--port', type=int, default=32753, help='Port to listen on')
+    parser.add_argument('--port', type=int, default=5006, help='Port to listen on')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
     args = parser.parse_args()
 
