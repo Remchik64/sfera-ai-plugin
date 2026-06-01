@@ -308,6 +308,69 @@ def health():
     return jsonify({"status": "ok", "uptime": time.time() - START_TIME})
 
 
+@app.route('/tts', methods=['POST'])
+def tts():
+    """Generate TTS audio using Edge TTS.
+
+    POST /tts
+    Body: {"text": "Hello", "voice": "Svetlana"}
+    Returns: {"audio": "base64...", "engine": "edge", "voice": "ru-RU-SvetlanaNeural", "format": "mp3"}
+    """
+    body = request.get_json(silent=True) or {}
+    text = str(body.get('text', '')).strip()
+    voice_name = str(body.get('voice', 'Svetlana')).strip()
+
+    if not text:
+        return jsonify({"error": "Text is required"}), 400
+
+    # Voice name mapping
+    voice_map = {
+        "Svetlana": "ru-RU-SvetlanaNeural",
+        "Dmitry": "ru-RU-DmitryNeural",
+    }
+    voice_id = voice_map.get(voice_name, "ru-RU-SvetlanaNeural")
+
+    try:
+        import asyncio
+        import edge_tts
+        import base64
+        import tempfile
+
+        async def generate():
+            communicate = edge_tts.Communicate(text, voice_id)
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+                temp_path = f.name
+            try:
+                await communicate.save(temp_path)
+                with open(temp_path, "rb") as audio:
+                    data = audio.read()
+                return data
+            finally:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
+        loop = asyncio.new_event_loop()
+        try:
+            audio_bytes = loop.run_until_complete(generate())
+        finally:
+            loop.close()
+
+        audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
+        app.logger.info(f"TTS: Generated {len(audio_bytes)} bytes for voice={voice_id}, text='{text[:50]}'")
+
+        return jsonify({
+            "audio": audio_b64,
+            "engine": "edge",
+            "voice": voice_id,
+            "format": "mp3",
+        })
+    except Exception as e:
+        app.logger.error(f"TTS: Generation failed: {e}")
+        return jsonify({"error": f"TTS generation failed: {str(e)}"}), 500
+
+
 START_TIME = time.time()
 
 
