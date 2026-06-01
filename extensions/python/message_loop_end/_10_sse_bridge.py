@@ -11,6 +11,18 @@ Architecture:
 - SSE server delivers events to Android app via SSE streaming
 - Port and host are configurable via default_config.yaml (sse_host, sse_port)
 
+Reminder flow (3+ hours):
+1. User says 'напомни позвонить маме через 3 часа'
+2. A0 sets alarm for +3 hours
+3. A0 responds 'Хорошо, напомню через 3 часа'
+4. After 3 hours, alarm fires
+5. Mobile app sends POST /notify to SSE server
+6. SSE server forwards to A0 (POST /api/chat)
+7. A0 generates 'Ренат, пора позвонить маме!'
+8. This extension intercepts the response
+9. Extension sends to SSE server (targeted or broadcast)
+10. SSE server delivers to phone (with pending if disconnected)
+
 No dependency on A0 ApiHandler for SSE — uses standalone server.
 """
 
@@ -122,6 +134,27 @@ def _is_scheduler_context(agent) -> bool:
     return False
 
 
+def _get_known_sessions() -> list[str]:
+    """Query SSE server for known (connected + previously seen) session IDs.
+    
+    Returns list of session IDs, or empty list if server unreachable.
+    Used to convert broadcast into targeted delivery.
+    """
+    try:
+        import requests
+        response = requests.get(
+            f"{SSE_SERVER_URL}/status",
+            timeout=3
+        )
+        if response.status_code == 200:
+            data = response.json()
+            # known_sessions includes both connected and previously seen sessions
+            return data.get('known_sessions', [])
+    except Exception as e:
+        logger.debug(f"Sfera SSE Bridge: Failed to get known sessions: {e}")
+    return []
+
+
 def _push_to_sse(event_type: str, data: dict, session_id: str = 'broadcast') -> bool:
     """Send event to standalone SSE server.
     
@@ -130,9 +163,66 @@ def _push_to_sse(event_type: str, data: dict, session_id: str = 'broadcast') -> 
         data: event payload
         session_id: target session (or 'broadcast' for all)
     
+    If session_id is 'broadcast', tries to resolve known sessions from
+    SSE server and sends targeted events to each. Falls back to broadcast
+    if server query fails. The server-side broadcast also saves to pending
+    for all known sessions (reconnect-safe).
+    
     Returns:
         True if sent successfully, False otherwise
     """
+    if session_id == 'broadcast':
+        # Try targeted delivery to known sessions first
+        known_sessions = _get_known_sessions()
+        if known_sessions:
+            success_count = 0
+            for sid in known_sessions:
+                try:
+                    import requests
+                    response = requests.post(
+                        f"{SSE_SERVER_URL}/push",
+                        json={
+                            "session_id": sid,
+                            "event_type": event_type,
+                            "data": data,
+                        },
+                        timeout=5
+                    )
+                    if response.status_code == 200:
+                        success_count += 1
+                except Exception:
+                    pass
+            PrintStyle.debug(
+                f"Sfera SSE Bridge: Targeted {event_type} to {success_count}/{len(known_sessions)} sessions"
+            )
+            return success_count > 0
+        
+        # Fall back to broadcast (server saves to pending for all known sessions)
+        try:
+            import requests
+            response = requests.post(
+                f"{SSE_SERVER_URL}/push",
+                json={
+                    "session_id": "broadcast",
+                    "event_type": event_type,
+                    "data": data,
+                },
+                timeout=5
+            )
+            if response.status_code == 200:
+                result = response.json()
+                PrintStyle.debug(
+                    f"Sfera SSE Bridge: Broadcast {event_type} OK, sent={result.get('sent', 0)}, known={result.get('known_sessions', 0)}"
+                )
+                return True
+            else:
+                PrintStyle.debug(f"Sfera SSE Bridge: Broadcast failed, status={response.status_code}")
+                return False
+        except Exception as e:
+            PrintStyle.debug(f"Sfera SSE Bridge: Broadcast error: {e}")
+            return False
+    
+    # Direct targeted delivery
     try:
         import requests
         response = requests.post(
@@ -146,13 +236,13 @@ def _push_to_sse(event_type: str, data: dict, session_id: str = 'broadcast') -> 
         )
         if response.status_code == 200:
             result = response.json()
-            PrintStyle.debug(f"Sfera SSE Bridge: Push {event_type} OK, sent={result.get('sent', 0)}")
+            PrintStyle.debug(f"Sfera SSE Bridge: Push {event_type} to {session_id} OK, sent={result.get('sent', 0)}")
             return True
         else:
-            PrintStyle.debug(f"Sfera SSE Bridge: Push failed, status={response.status_code}")
+            PrintStyle.debug(f"Sfera SSE Bridge: Push to {session_id} failed, status={response.status_code}")
             return False
     except Exception as e:
-        PrintStyle.debug(f"Sfera SSE Bridge: Push error: {e}")
+        PrintStyle.debug(f"Sfera SSE Bridge: Push to {session_id} error: {e}")
         return False
 
 
@@ -162,7 +252,7 @@ class SSEBridge(Extension):
     This is the key component for self-activation:
     - When a scheduler task completes, the agent response is intercepted
     - Response is forwarded to standalone SSE server (configurable port)
-    - SSE server pushes event to mobile app
+    - SSE server pushes event to mobile app (with pending for offline clients)
     - App shows notification and/or plays TTS
     
     SSE host and port are read from default_config.yaml (sse_host, sse_port).
@@ -185,16 +275,31 @@ class SSEBridge(Extension):
 
         # For scheduler tasks: always send agent_response event
         if is_scheduler:
+            context_id = getattr(self.agent.context, 'id', '')
+            context_name = getattr(self.agent.context, 'name', '')
             PrintStyle.standard(
-                f"Sfera SSE Bridge: Scheduler task response, forwarding to SSE server ({SSE_SERVER_URL})"
+                f"Sfera SSE Bridge: Scheduler task response, forwarding to SSE server ({SSE_SERVER_URL}), context={context_name}"
             )
+            
+            # Try to find session_id from context_id
+            # Scheduler tasks may have context_id that maps to a known session
+            session_id = 'broadcast'
+            if context_id and not context_id.startswith('voice_'):
+                # Check if this context_id is a known SSE session
+                known = _get_known_sessions()
+                if context_id in known:
+                    session_id = context_id
+                    PrintStyle.standard(
+                        f"Sfera SSE Bridge: Resolved scheduler context to session_id={session_id}"
+                    )
+            
             _push_to_sse("agent_response", {
                 "text": response_text,
                 "source": "scheduler",
                 "timestamp": int(time.time()),
-                "context_id": getattr(self.agent.context, 'id', ''),
-                "context_name": getattr(self.agent.context, 'name', ''),
-            })
+                "context_id": context_id,
+                "context_name": context_name,
+            }, session_id=session_id)
 
             # Also check for reminder patterns
             if _detect_reminder(response_text):
@@ -207,7 +312,7 @@ class SSEBridge(Extension):
                     "source": "scheduler",
                     "timestamp": int(time.time()),
                     "full_response": response_text,
-                })
+                }, session_id=session_id)
             return
 
         # For regular responses (voice sessions): check for reminder patterns
