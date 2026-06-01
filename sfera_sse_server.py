@@ -29,7 +29,7 @@ import argparse
 import logging
 from collections import deque
 from typing import Optional
-from flask import Flask, Request, Response, request, jsonify
+from flask import Flask, Request, Response, request, jsonify, stream_with_context
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [SferaSSE] %(message)s')
 
@@ -274,17 +274,19 @@ def sse_events():
             app.logger.info(f"SSE: Stream closed for session_id={session_id}")
 
     return Response(
-        generate(),
-        mimetype='text/event-stream',
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
         headers={
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no',
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type',
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
         }
     )
+
+
 
 
 @app.route('/push', methods=['POST'])
