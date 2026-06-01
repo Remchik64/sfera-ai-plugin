@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sfera AI SSE Server - Standalone SSE server for self-activation.
 
-Runs independently from Agent Zero on port 32753.
+Runs independently from Agent Zero on configurable port (default 5006).
 Receives events from A0 extension and pushes to Android clients.
 
 Architecture:
