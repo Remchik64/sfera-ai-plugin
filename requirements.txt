@@ -1,0 +1,7 @@
+# Sfera AI Plugin — SSE bridge between Agent Zero and the Sfera phone app
+flask>=3.0
+requests>=2.31
+pyyaml>=6.0
+
+# optional: required only for the /tts endpoint and SSE audio playback
+edge-tts>=6.1

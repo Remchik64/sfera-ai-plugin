@@ -1,70 +1,79 @@
-# Sfera AI Plugin for Agent Zero
+# Sfera AI Plugin — мост пушей между Agent Zero и телефоном
 
-Self-activation bridge between Agent Zero and Sfera AI mobile app.
-Enables real-time push notifications, reminders, and agent response
-delivery via SSE (Server-Sent Events) with Edge TTS audio synthesis.
+Отдельный SSE-сервер, который доставляет события на Android-приложение Sfera
+и озвучивает их через Edge TTS.
 
-## Architecture
+> Проверено чтением кода и живыми запросами 2026-11-06: `/events`, `/push`,
+> `/status`, `/health` работают; доставка недоставленных событий при реконнекте
+> подтверждена. `/notify` содержит дефект — см. «Известные проблемы».
 
-- **SSE Server** (`sfera_sse_server.py`): Standalone SSE server (configurable port, default 5006)
-- **Extension** (`_10_sse_bridge.py`): Intercepts agent responses and forwards to SSE server
-- **Edge TTS** (`/tts` endpoint): Generates MP3 audio for SSE event text-to-speech
-- **Endpoints**:
-  - GET /events?session_id=X — SSE streaming (real-time push to mobile)
-  - POST /push — Send event to connected clients (from A0 extension)
-  - POST /notify — Receive notification from mobile app (SMS, Telegram, etc.)
-  - POST /tts — Generate TTS audio via Edge TTS (text + voice → base64 MP3)
-  - GET /status — Connection status
-  - GET /health — Health check
+## Что это
 
-## Port Configuration
+Два компонента в одном репозитории:
 
-The SSE server port is **configurable** and not hardcoded:
+1. **`sfera_sse_server.py`** — самостоятельный Flask-сервер (порт **5006**)
+2. **`extensions/python/message_loop_end/_10_sse_bridge.py`** — расширение A0,
+   перехватывающее ответы агента и отправляющее их на SSE-сервер
 
-- **Server**: `--port` argument (default 5006)
-- **Extension**: reads `sse_host` and `sse_port` from `default_config.yaml`
-- **Android app**: SSE port from SharedPreferences (SettingsActivity)
+## Эндпоинты
 
-Default port is 5006, mapped in Docker via `-p 5006:5006`.
+| Метод | Путь | Что делает |
+|---|---|---|
+| GET | `/events?session_id=X` | SSE-поток: `connected`, `reminder`, `notification`, `message`, `agent_response`, `keepalive`, `disconnect` |
+| POST | `/push` | отправить событие: `{session_id, event_type, data}` |
+| POST | `/notify` | приём уведомления с телефона (**см. проблему 1**) |
+| POST | `/tts` | Edge TTS: `{text, voice}` → `{audio: base64, engine, voice, format}` |
+| GET | `/status` | подключённые и известные сессии, счётчики pending |
+| GET | `/health` | `{status, uptime}` |
 
-## Installation
+`event_type` для `/push`: `reminder`, `notification`, `message`, `agent_response`.
+`session_id: "broadcast"` — всем; иначе адресно одной сессии.
 
-1. Copy plugin to A0 plugins directory:
-   ```bash
-   git clone https://github.com/Remchik64/sfera-ai-plugin.git
-   cp -r sfera-ai-plugin/* /a0/usr/plugins/sfera_ai/
-   ```
+## Ключевая механика: доставка после офлайна
 
-2. Enable plugin in A0 WebUI (Settings → Plugins)
+Сервер помнит **все** сессии, которые когда-либо подключались
+(`known_sessions`), и складывает для них события в очередь `pending`.
 
-3. Start SSE server:
-   ```bash
-   python sfera_sse_server.py --port 5006
-   ```
+- TTL очереди — 24 часа (`pending_events_ttl`)
+- Максимум событий на сессию — 100 (`max_pending_events`)
+- `broadcast` пишет в pending для всех известных сессий, а не только для
+  подключённых — поэтому напоминание через 3 часа дойдёт после реконнекта
 
-4. Android app connects to SSE server on configured port (default 5006)
+Проверено вживую: событие, отправленное офлайн-клиенту, пришло сразу после
+подключения к `/events`.
 
-## Edge TTS Voices
+## Установка
 
-- **Svetlana** (female) → `ru-RU-SvetlanaNeural`
-- **Dmitry** (male) → `ru-RU-DmitryNeural`
-
-POST /tts example:
 ```bash
-curl -X POST http://localhost:5006/tts \
-  -H 'Content-Type: application/json' \
-  -d '{"text": "Ренат, пора позвонить маме!", "voice": "Svetlana"}'
+git clone https://github.com/Remchik64/sfera-ai-plugin.git
+cp -r sfera-ai-plugin/* /a0/usr/plugins/sfera_ai/
 ```
 
-## Self-Activation Flow
+Включить плагин в A0 WebUI (Settings → Plugins) и запустить SSE-сервер:
 
-1. User says: "напомни позвонить маме через 10 минут"
-2. A0 processes request, extension intercepts response
-3. Extension sends event to SSE server via POST /push
-4. SSE server pushes event to Android app via SSE streaming
-5. App shows notification and/or plays TTS via Edge TTS
+```bash
+python sfera_sse_server.py --port 5006
+```
 
-## Configuration
+Порт должен быть проброшен из Docker (`-p 5006:5006`), иначе телефон не
+подключится.
+
+## Зависимости
+
+| Пакет | Зачем | Обязателен |
+|---|---|---|
+| `flask` | SSE-сервер | да |
+| `requests` | форвард уведомлений | да |
+| `edge-tts` | `/tts` и озвучка событий | для TTS |
+| `pyyaml` | чтение конфига расширением | да |
+
+```bash
+pip install flask requests pyyaml edge-tts
+```
+
+`requirements.txt` в репозитории отсутствовал — это исправлено.
+
+## Конфигурация
 
 `default_config.yaml`:
 ```yaml
@@ -77,6 +86,67 @@ max_pending_events: 100
 broadcast_on_scheduler_task: true
 ```
 
-## License
+Расширение читает `sse_host` и `sse_port` из этого файла, поэтому порт не
+зашит в код.
+
+## Поток самопроактивации
+
+```
+1. «напомни позвонить маме через 3 часа»
+2. A0 ставит будильник, отвечает пользователю
+3. Через 3 часа звонит AlarmManager на телефоне
+4. Приложение шлёт POST /notify на SSE-сервер
+5. (задумано) сервер форвардит в A0 → A0 формирует текст напоминания
+6. Расширение _10_sse_bridge.py перехватывает ответ агента
+7. POST /push → SSE → телефон: уведомление + озвучка
+```
+
+## Голоса Edge TTS
+
+```
+Svetlana → ru-RU-SvetlanaNeural
+Dmitry   → ru-RU-DmitryNeural
+```
+
+Фактически в бесплатном каталоге Edge только эти два русских голоса.
+
+```bash
+curl -X POST http://localhost:5006/tts \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "Ренат, пора позвонить маме!", "voice": "Svetlana"}'
+```
+
+## Известные проблемы
+
+1. **`/notify` шлёт на несуществующий эндпоинт.** В `sfera_sse_server.py`
+   (`notify()`) запрос идёт на `{A0_URL}/api/chat`, но в Agent Zero такого
+   маршрута нет — есть `/api/api_message`. Форвард уведомлений с телефона в
+   мозг **молча падает в 404**. Пуш на телефон при этом работает.
+2. **`/push` и `/notify` без авторизации.** Любой в сети может отправить
+   поддельное «уведомление от ассистента» на телефон и услышать его голосом.
+3. **Ложные пуши.** `_is_scheduler_context()` считает планировщиком **любой**
+   контекст с непустым `name`, а `helpers/subagents.py` имя задаёт. Ответ
+   субагента уйдёт на телефон как «задача планировщика».
+4. **SSE всегда по HTTP.** Android-клиент (`SSEClient.kt`) принудительно
+   ставит `http://`, срезая схему — HTTPS-туннель сломает пуши.
+5. **Порт 32753 в старых записях** — историческое значение. Актуальный порт
+   **5006** (сервер, Android `DEFAULT_SSE_PORT`, Docker-маппинг).
+
+## Проверка
+
+```bash
+curl http://localhost:5006/health
+curl http://localhost:5006/status
+curl -X POST http://localhost:5006/push -H 'Content-Type: application/json' \
+  -d '{"session_id":"test","event_type":"message","data":{"text":"проверка"}}'
+```
+
+## Связанные репозитории
+
+- **`agent_rema`** — Android-приложение и голосовой плагин A0
+- **`sfera-voice`** — универсальный слой озвучки (RouterAI, Edge, локальные CLI)
+  с маппингом голосов и современными русскими голосами
+
+## Лицензия
 
 MIT
